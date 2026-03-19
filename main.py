@@ -141,8 +141,13 @@ async def ffuf_scan(ctx: RunContext, request: FfufDeps) -> str:
         "filter_lines": f"-fl {request.filter_lines}",
         "filter_http_response_size": f"-fs {request.filter_http_response_size}"
     }
-    requests = ["-recursion", request.recursion, "-X", request.http_method, ""]
-    cmd = ["ffuf", "-u", request.target_url, "-w", wordlist, requests, "-c"]
+    extra_request_flags = []
+    keys = list(requests_flag_map.keys())
+    for key in keys:
+        if getattr(request, key):
+            extra_request_flags.append(requests_flag_map[key])
+    requests = str(f"-recursion {str(request.recursion)} -X {request.http_method}", *extra_request_flags)
+    cmd = ["ffuf", "-u", str(request.target_url), "-w", wordlist, requests, "-c"]
     result = subprocess.run(cmd, capture_output=True, text=True)
     result = result.stdout if result.stdout != '' else result.stderr
     print(result)
