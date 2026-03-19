@@ -2,13 +2,11 @@ from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 from pydantic_ai import Agent, RunContext, ModelRetry
 import asyncio
-from dataclasses import dataclass
 import subprocess
-from subprocess import Popen
 import json
 from datetime import datetime
 from pydantic.networks import IPvAnyAddress, IPvAnyNetwork, AnyUrl
-from typing import Literal, Optional
+from typing import Literal
 import os
 
 load_dotenv()
@@ -130,29 +128,69 @@ async def ffuf_scan(ctx: RunContext, request: FfufDeps) -> str:
     """Use ffuf to enumerate a target."""
     wordlist = select_wordlist(request.wordlist_attributes)
     requests_flag_map = {
-        "cookie_data": f"-b {request.cookie_data}",
-        "post_data": f"-d {request.post_data}",
-        "headers": f"-H {request.headers}",
-        "extensions": f"-e {request.extensions}",
-        "verbose": "-v",
-        "match_lines": f"-ml {str(request.match_lines)}",
-        "match_http_response_size": f"-ms {str(request.match_http_response_size)}",
-        "filter_http_status_codes": f"-fc {request.filter_http_status_codes}",
-        "filter_lines": f"-fl {request.filter_lines}",
-        "filter_http_response_size": f"-fs {request.filter_http_response_size}"
+        "cookie_data":               ["-b", request.cookie_data],
+        "post_data":                 ["-d", request.post_data],
+        "headers":                   ["-H", request.headers],
+        "extensions":                ["-e", ",".join(request.extensions)] if request.extensions else None,
+        "verbose":                   ["-v"],
+        "match_lines":               ["-ml", str(request.match_lines)],
+        "match_http_response_size":  ["-ms", str(request.match_http_response_size)],
+        "filter_http_status_codes":  ["-fc", ",".join(str(c) for c in request.filter_http_status_codes)] if request.filter_http_status_codes else None,
+        "filter_lines":              ["-fl", str(request.filter_lines)],
+        "filter_http_response_size": ["-fs", str(request.filter_http_response_size)],
     }
-    extra_request_flags = []
-    keys = list(requests_flag_map.keys())
-    for key in keys:
-        if getattr(request, key):
-            extra_request_flags.append(requests_flag_map[key])
-    requests = str(f"-recursion {str(request.recursion)} -X {request.http_method}", *extra_request_flags)
-    cmd = ["ffuf", "-u", str(request.target_url), "-w", wordlist, requests, "-c"]
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    result = result.stdout if result.stdout != '' else result.stderr
-    print(result)
-    return result
     
+    extra_flags = []
+    keys = list(requests_flag_map.keys())
+    for key, flags in requests_flag_map.items():
+        if getattr(request, key):
+            extra_flags.extend(flags)
+
+    mc_codes = ",".join(str(c) for c in request.match_http_status_codes)
+    cmd = ["ffuf", 
+           "-u", str(request.target_url), 
+           "-w", wordlist, 
+           "-recursion-depth", str(request.recursion),
+           "-X", request.http_method,
+           "-mc", mc_codes,
+           "-maxtime", str(request.maxtime),
+           *extra_flags, 
+           "-c"]
+    print(f"ffuf running: {' '.join(cmd)}")
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE
+    )
+
+    output_lines = []
+    async for line in proc.stdout:
+        decoded = line.decode()
+        print(decoded, end="")        # stream to terminal in real time
+        output_lines.append(decoded)
+    await proc.wait()
+
+    if proc.returncode != 0:
+        stderr = await proc.stderr.read()
+        print(f"[ffuf] error: {stderr.decode()}")
+        return stderr.decode()
+
+    return "".join(output_lines)
+
+@agent.tool
+async def make_web_request(ctx: RunContext):
+    pass
+
+@agent.tool
+async def write_to_file(ctx: RunContext, content: str, name_of_file: str=Field(description="Only specify the name of the file to write to, not a path.")) -> int:
+    try:
+        with open(name_of_file, 'w') as f:
+            f.write(content)
+        return 0
+    except Exception as e:
+        print(e)
+        return 1
+
 
 async def main():
     history = []
