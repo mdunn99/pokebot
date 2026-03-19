@@ -31,15 +31,18 @@ class NmapScan(BaseModel):
     target: IPvAnyAddress | IPvAnyNetwork | str
 
 class FfufDeps(BaseModel):
-    target_url: AnyUrl
+    target_url: AnyUrl = Field(description="The URL including the location you'd like to pass in a wordlist, denoted by the keyword \'FUZZ\'"
+    " (i.e. http://10.10.0.1/FUZZ).")
     wordlist_attributes: WordlistType = Field(description="A set of attributes that will determine the wordlist.")
     recursion: int = Field(default=0, description="If recursion is necessary, what should the depth be?")
     http_method: str = Field(default="GET", description="HTTP method to use.")
+    cookie_data: str | None = Field(description="(i.e. NAME1=VALUE1; NAME2=VALUE2) for copy as curl functionality.")
     post_data: str | None = Field(default=None, description = "POST data to pass to request.")
     headers: str | None = Field(default=None, description = "Headers to pass into request")
     extensions: list[str] | None = Field(default=None, description = "Comma-separated list of extensions names with dot-included (i.e. .php,.txt).")
     follow_redirects: bool = Field(default=False)
     verbose: bool = Field(default=False, description="Verbose output, printing full URL and redirect location (if any) with the results.")
+    maxtime: int = Field(default=60, description='Maximum running time in seconds per job.')
     match_http_status_codes: list[int] = Field(default=[200,204,301,302,307,401,403], description="Match HTTP status codes.")
     match_lines: int | None = Field(default=None, description="Match amount of lines in response.")
     match_http_response_size: int | None = Field(default=None, description="Match HTTP response size.")
@@ -80,7 +83,7 @@ def select_wordlist(wordlist_attributes: WordlistType) -> str:
     if key in WORDLIST_MAP:
         return os.path.join(SECLISTS_PATH, WORDLIST_MAP[key])
     else:
-        raise ModelRetry(f"{key} not available. Please try a different set of attributes.")
+        return ''
 
 def get_edb_id(exploit):
     return int(exploit.get("EDB-ID", 0))
@@ -118,13 +121,32 @@ async def nmap_scan(ctx: RunContext, scan: NmapScan) -> str:
         cmd = ["sudo", "nmap", *flags, str(scan.target), "-oN", "2026"]
     print(f"running: {" ".join(cmd)}")
     result = subprocess.run(cmd, capture_output=True, text=True)
-    print(result.stdout if result.stdout != '' else result.stderr)
-    return result.stdout if result.stdout != '' else result.stderr
+    result = result.stdout if result.stdout != '' else result.stderr
+    print(result)
+    return result
 
 @agent.tool
 async def ffuf_scan(ctx: RunContext, request: FfufDeps) -> str:
     """Use ffuf to enumerate a target."""
-    cmd = ["ffuf", "-c"]
+    wordlist = select_wordlist(request.wordlist_attributes)
+    requests_flag_map = {
+        "cookie_data": f"-b {request.cookie_data}",
+        "post_data": f"-d {request.post_data}",
+        "headers": f"-H {request.headers}",
+        "extensions": f"-e {request.extensions}",
+        "verbose": "-v",
+        "match_lines": f"-ml {str(request.match_lines)}",
+        "match_http_response_size": f"-ms {str(request.match_http_response_size)}",
+        "filter_http_status_codes": f"-fc {request.filter_http_status_codes}",
+        "filter_lines": f"-fl {request.filter_lines}",
+        "filter_http_response_size": f"-fs {request.filter_http_response_size}"
+    }
+    requests = ["-recursion", request.recursion, "-X", request.http_method, ""]
+    cmd = ["ffuf", "-u", request.target_url, "-w", wordlist, requests, "-c"]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = result.stdout if result.stdout != '' else result.stderr
+    print(result)
+    return result
     
 
 async def main():
