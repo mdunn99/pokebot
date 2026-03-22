@@ -1,32 +1,29 @@
+import subprocess, os, json, asyncio
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
-from pydantic_ai import Agent, RunContext, ModelRetry
-import asyncio
-import subprocess
-import json
+from pydantic_ai import Agent, ModelRetry
 from datetime import datetime
 from pydantic.networks import IPvAnyAddress, IPvAnyNetwork, AnyUrl
 from typing import Literal
-import os
 
 load_dotenv()
 SECLISTS_PATH = '/home/mike/documents/SecLists'
 
 class PortRange(BaseModel):
     start: int
-    end: int | None = Field(default=None)
+    end: int
 
 class WordlistType(BaseModel):
-    category: Literal["Subdomains", "Web-Content/Directories", "Web-Content/Files", "Fuzzing", "Passwords", "Pattern-Matching", "Web-Shells", "Usernames"] = Field(description="Matcher for a list of pre-picked SecLists wordlists.")
+    category: Literal["Subdomains", "Web-Content/Directories", "Web-Content/Files", "Passwords", "Usernames"] = Field(description="Matcher for a list of pre-picked SecLists wordlists.")
     size: Literal["small", "medium", "large"]
 
-class NmapScan(BaseModel):
-    scan_types: list[Literal["syn", "udp", "ping-only", "version", "skip-host-discovery"]]
-    top_ports: bool=Field(description="Mark as true if you'd like to enumerate a specified top amount of ports (--top-ports). Fill that" \
-    "number in the 'ports.start' field and not ports.end.")
-    ports: PortRange | None = Field(default=None)
+class NmapDeps(BaseModel):
+    scan_types: list[Literal["syn", "udp", "ping-only", "connect", "ack", "window", "maimon", "version", "skip-host-discovery"]]
+    top_ports: int | None = Field(default=None, description="Define the number of '--top-ports' to scan.")
+    ports: PortRange | None = Field(default=None, description="When a specific set of ports must be specified instead of a wide net of top ports.")
     timing: Literal["slow", "normal", "fast", "aggressive"] | None = Field(default=None)
     target: IPvAnyAddress | IPvAnyNetwork | str
+
 
 class FfufDeps(BaseModel):
     target_url: AnyUrl = Field(description="The URL including the location you'd like to pass in a wordlist, denoted by the keyword \'FUZZ\'"
@@ -66,16 +63,21 @@ agent = Agent(
 
 def select_wordlist(wordlist_attributes: WordlistType) -> str:
     WORDLIST_MAP = {
-        ("Web-Content/Directories", "small"): "Discovery/Web-Content/raft-small-directories.txt",
-        ("Web-Content/Directories", "medium"): "Discovery/Web-Content/raft-medium-directories.txt",
-        ("Web-Content/Directories", "large"): "Discovery/Web-Content/raft-large-directories.txt",
-        ("Web-Content/Files", "small"): "Discovery/Web-Content/raft-small-files.txt",
-        ("Web-Content/Files", "medium"): "Discovery/Web-Content/raft-medium-files.txt",
-        ("Web-Content/Files", "large"): "Discovery/Web-Content/raft-large-files.txt",
-        ("DNS", "small"): "Discovery/DNS/subdomains-top1million-5000.txt",
-        ("DNS", "medium"): "Discovery/DNS/subdomains-top1million-20000.txt",
-        ("DNS", "large"): "Discovery/DNS/subdomains-top1million-110000.txt",
-
+        ("Web-Content/Directories", "small"):   "Discovery/Web-Content/raft-small-directories.txt",
+        ("Web-Content/Directories", "medium"):  "Discovery/Web-Content/raft-medium-directories.txt",
+        ("Web-Content/Directories", "large"):   "Discovery/Web-Content/raft-large-directories.txt",
+        ("Web-Content/Files", "small"):         "Discovery/Web-Content/raft-small-files.txt",
+        ("Web-Content/Files", "medium"):        "Discovery/Web-Content/raft-medium-files.txt",
+        ("Web-Content/Files", "large"):         "Discovery/Web-Content/raft-large-files.txt",
+        ("Subdomains", "small"):                "Discovery/DNS/subdomains-top1million-5000.txt",
+        ("Subdomains", "medium"):               "Discovery/DNS/subdomains-top1million-20000.txt",
+        ("Subdomains", "large"):                "Discovery/DNS/subdomains-top1million-110000.txt",
+        ("Passwords", "small"):                 "Passwords/Leaked-Databases/rockyou-10.txt",
+        ("Passwords", "medium"):                "Passwords/Leaked-Databases/rockyou-45.txt",
+        ("Passwords", "large"):                 "Passwords/Lekaed-Databases/rockyou.txt",
+        ("Usernames", "small"):                 "Usernames/top-usernames-shortlist",
+        ("Usernames", "medium"):                "Usernames/sap-default-usernames.txt",
+        ("Usernames", "large"):                 "Usernames/xato-net-10-million-usernames.txt"
     }
     key = (wordlist_attributes.category, wordlist_attributes.size)
     if key in WORDLIST_MAP:
@@ -87,8 +89,8 @@ def get_edb_id(exploit):
     return int(exploit.get("EDB-ID", 0))
 
 @agent.tool
-async def search_exploitdb(ctx: RunContext, query: str, number_of_results: int=5) -> list[dict]:
-    """Search ExploitDB via serachsploit. searchsploit works best by using very few and brief keywords. Returns a list of exploits as strings."""
+async def search_exploitdb(query: str, number_of_results: int=5) -> list[dict]:
+    """Search ExploitDB via searchsploit. searchsploit works best by using very few and brief keywords. Returns a list of exploits as strings."""
     print(f'searching exploitdb with query: {query}')
     result = await asyncio.to_thread(subprocess.run, ["searchsploit", "-j", query], capture_output=True, text=True)
     data = json.loads(result.stdout)
@@ -99,24 +101,36 @@ async def search_exploitdb(ctx: RunContext, query: str, number_of_results: int=5
     return exploits[:number_of_results]
 
 @agent.tool
-async def nmap_scan(ctx: RunContext, scan: NmapScan) -> str:
+async def nmap_scan(scan: NmapDeps) -> str:
     """Perform an nmap scan. stdout or stderr is returned."""
+    time = str(datetime.now())
+
     scan_map = {
-        "syn": "-sS",
-        "udp": "-sU",
-        "ping-only": "-sn",
-        "version": "-sV",
+        "syn":                 "-sS",
+        "udp":                 "-sU",
+        "ping-only":           "-sn",
+        "connect":             "-sT",
+        "ack":                 "-sA",
+        "window":              "-sW",
+        "maimon":              "-sA",
+        "version":             "-sV",
         "skip-host-discovery": "-Pn",
     }
     flags = [scan_map[s] for s in scan.scan_types]
-    if scan.ports:
-        if scan.top_ports:
-            cmd = ["sudo", "nmap", *flags, "--top-ports", str(scan.ports.start), str(scan.target), "-oN", str(datetime.now())]
-        else:
-            ports = f"{scan.ports.start}-{scan.ports.end}"
-            cmd = ["sudo", "nmap", *flags, str(scan.target), "-p", ports, "-oN", "2026"]
-    else:
-        cmd = ["sudo", "nmap", *flags, str(scan.target), "-oN", "2026"]
+
+    cmd = ["sudo", 
+           "nmap", 
+           *flags, 
+           str(scan.target), 
+           "-oN", 
+           time]
+    if "ping-only" in flags:
+        cmd = ["sudo", "nmap", "-sn", str(scan.target), "-oN", time]
+    elif scan.top_ports:
+        cmd.extend(["--top-ports", str(scan.top_ports)])
+    elif scan.ports:
+        ports = f"{scan.ports.start}-{scan.ports.end}"
+        cmd.extend(["-p", ports])
     print(f"running: {" ".join(cmd)}")
     result = subprocess.run(cmd, capture_output=True, text=True)
     result = result.stdout if result.stdout != '' else result.stderr
@@ -124,7 +138,7 @@ async def nmap_scan(ctx: RunContext, scan: NmapScan) -> str:
     return result
 
 @agent.tool
-async def ffuf_scan(ctx: RunContext, request: FfufDeps) -> str:
+async def ffuf_scan(request: FfufDeps) -> str:
     """Use ffuf to enumerate a target."""
     wordlist = select_wordlist(request.wordlist_attributes)
     requests_flag_map = {
@@ -178,11 +192,11 @@ async def ffuf_scan(ctx: RunContext, request: FfufDeps) -> str:
     return "".join(output_lines)
 
 @agent.tool
-async def make_web_request(ctx: RunContext):
+async def make_web_request():
     pass
 
 @agent.tool
-async def write_to_file(ctx: RunContext, content: str, name_of_file: str=Field(description="Only specify the name of the file to write to, not a path.")) -> int:
+async def write_to_file(content: str, name_of_file: str=Field(description="Only specify the name of the file to write to, not a path.")) -> int:
     try:
         with open(name_of_file, 'w') as f:
             f.write(content)
