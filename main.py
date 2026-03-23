@@ -1,13 +1,9 @@
-import subprocess, os, json, asyncio
-from dotenv import load_dotenv
+import subprocess, os, json, asyncio, sys, dotenv
 from pydantic import BaseModel, Field
-from pydantic_ai import Agent, ModelRetry
+from pydantic_ai import Agent, RunContext, ModelRetry
 from datetime import datetime
 from pydantic.networks import IPvAnyAddress, IPvAnyNetwork, AnyUrl
 from typing import Literal
-
-load_dotenv()
-SECLISTS_PATH = '/home/mike/documents/SecLists'
 
 class PortRange(BaseModel):
     start: int
@@ -54,10 +50,10 @@ class TargetContext(BaseModel):
     " complete the task, or the task cannot be completed without intervention.")
 
 agent = Agent(
-    model="gpt-5.4-mini",
+    model="o3-mini",
     output_type=TargetContext,
-    system_prompt=("You are a pentesting reconnaissance tool. "
-               "Given a user prompt, gather information about the target using the available tools. "
+    system_prompt=("You are a pentesting reconnaissance assistant. "
+               "When a user directs it, gather information about the target using the available tools. "
                "Once you have enough information to summarize your findings, return a TargetContext. "
                "Do not attempt actions beyond reconnaissance. Be brief and concise."))
 
@@ -89,9 +85,14 @@ def get_edb_id(exploit):
     return int(exploit.get("EDB-ID", 0))
 
 @agent.tool
-async def search_exploitdb(query: str, number_of_results: int=5) -> list[dict]:
+async def search_exploitdb(ctx: RunContext, query: str, number_of_results: int=5) -> list[dict]:
     """Search ExploitDB via searchsploit. searchsploit works best by using very few and brief keywords. Returns a list of exploits as strings."""
     print(f'searching exploitdb with query: {query}')
+    try:
+        subprocess.run(["searchsploit", "-v"], capture_output=True)
+    except:
+        print("Searchsploit not found. Please install it: https://github.com/offensive-security/exploitdb.git")
+        sys.exit()
     result = await asyncio.to_thread(subprocess.run, ["searchsploit", "-j", query], capture_output=True, text=True)
     data = json.loads(result.stdout)
     exploits = data.get("RESULTS_EXPLOIT")
@@ -101,8 +102,14 @@ async def search_exploitdb(query: str, number_of_results: int=5) -> list[dict]:
     return exploits[:number_of_results]
 
 @agent.tool
-async def nmap_scan(scan: NmapDeps) -> str:
+async def nmap_scan(ctx: RunContext, scan: NmapDeps) -> str:
     """Perform an nmap scan. stdout or stderr is returned."""
+
+    try:
+        subprocess.run(["nmap", "-v"], capture_output=True)
+    except:
+        print("Nmap not found. Please install it: https://nmap.org/download")
+        sys.exit()
     time = str(datetime.now())
 
     scan_map = {
@@ -138,8 +145,13 @@ async def nmap_scan(scan: NmapDeps) -> str:
     return result
 
 @agent.tool
-async def ffuf_scan(request: FfufDeps) -> str:
+async def ffuf_scan(ctx: RunContext, request: FfufDeps) -> str:
     """Use ffuf to enumerate a target."""
+
+    try:
+        subprocess.run(["nmap", "-v"], capture_output=True)
+    except:
+        print("ffuf not found. Please install it: https://github.com/ffuf/ffuf")
     wordlist = select_wordlist(request.wordlist_attributes)
     requests_flag_map = {
         "cookie_data":               ["-b", request.cookie_data],
@@ -192,11 +204,11 @@ async def ffuf_scan(request: FfufDeps) -> str:
     return "".join(output_lines)
 
 @agent.tool
-async def make_web_request():
+async def make_web_request(ctx: RunContext):
     pass
 
 @agent.tool
-async def write_to_file(content: str, name_of_file: str=Field(description="Only specify the name of the file to write to, not a path.")) -> int:
+async def write_to_file(ctx: RunContext, content: str, name_of_file: str=Field(description="Only specify the name of the file to write to, not a path.")) -> int:
     try:
         with open(name_of_file, 'w') as f:
             f.write(content)
@@ -205,8 +217,28 @@ async def write_to_file(content: str, name_of_file: str=Field(description="Only 
         print(e)
         return 1
 
+def check_envs():
+    global SECLISTS_PATH
+    path = False
+    
+    while path == False:
+        try:
+            dotenv.load_dotenv()
+            dotenv_file = dotenv.find_dotenv()
+        except Exception as e:
+            print(".env file not found. An OpenAI API key must be set in the root file's .env file. Read README for instructions.")
+            sys.exit()
+        try:
+            SECLISTS_PATH = os.environ["SECLISTS_PATH"]
+            path = True
+        except KeyError as e:
+            print("SecLists install path not found.  You can install it here:", "https://github.com/danielmiessler/seclists")
+            SECLISTS_PATH_INPUT = input("Please enter the location of your SecLists installation:\n")
+            dotenv.set_key(dotenv_file, "SECLISTS_PATH", SECLISTS_PATH_INPUT)
+
 
 async def main():
+    check_envs()
     history = []
     while True:
         print('\n(Type \'exit\' to exit).')
