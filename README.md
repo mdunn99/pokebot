@@ -11,7 +11,7 @@
 - exploitdb search
 
 # Install dependencies
-'pip install -r requirements.txt'
+`pip install -r requirements.txt`
 
 ## Install searchsploit If Necessary
 ```
