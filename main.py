@@ -13,6 +13,14 @@ class WordlistType(BaseModel):
     category: Literal["Subdomains", "Web-Content/Directories", "Web-Content/Files", "Passwords", "Usernames"] = Field(description="Matcher for a list of pre-picked SecLists wordlists.")
     size: Literal["small", "medium", "large"]
 
+class WebRequest(BaseModel):
+    target_url: AnyUrl
+    http_method: str = Field(default="GET", description="HTTP method to use.")
+    cookie_data: str | None = Field(default=None, description="(i.e. NAME1=VALUE1; NAME2=VALUE2).")
+    post_data: str | None = Field(default=None, description = "POST data to pass to request.")
+    headers: str | None = Field(default=None, description = "Headers to pass into request")
+
+
 class NmapDeps(BaseModel):
     scan_types: list[Literal["syn", "udp", "ping-only", "connect", "ack", "window", "maimon", "version", "skip-host-discovery"]]
     top_ports: int | None = Field(default=None, description="Define the number of '--top-ports' to scan.")
@@ -21,15 +29,9 @@ class NmapDeps(BaseModel):
     target: IPvAnyAddress | IPvAnyNetwork | str
 
 
-class FfufDeps(BaseModel):
-    target_url: AnyUrl = Field(description="The URL including the location you'd like to pass in a wordlist, denoted by the keyword \'FUZZ\'"
-    " (i.e. http://10.10.0.1/FUZZ).")
+class FfufDeps(WebRequest):
     wordlist_attributes: WordlistType = Field(description="A set of attributes that will determine the wordlist.")
     recursion: int = Field(default=0, description="If recursion is necessary, what should the depth be?")
-    http_method: str = Field(default="GET", description="HTTP method to use.")
-    cookie_data: str | None = Field(description="(i.e. NAME1=VALUE1; NAME2=VALUE2) for copy as curl functionality.")
-    post_data: str | None = Field(default=None, description = "POST data to pass to request.")
-    headers: str | None = Field(default=None, description = "Headers to pass into request")
     extensions: list[str] | None = Field(default=None, description = "Comma-separated list of extensions names with dot-included (i.e. .php,.txt).")
     follow_redirects: bool = Field(default=False)
     verbose: bool = Field(default=False, description="Verbose output, printing full URL and redirect location (if any) with the results.")
@@ -145,41 +147,48 @@ async def nmap_scan(ctx: RunContext, scan: NmapDeps) -> str:
     return result
 
 @agent.tool
-async def ffuf_scan(ctx: RunContext, request: FfufDeps) -> str:
+async def ffuf_scan(ctx: RunContext, ffuf_dependencies: FfufDeps) -> str:
     """Use ffuf to enumerate a target."""
-
     try:
         subprocess.run(["nmap", "-v"], capture_output=True)
     except:
         print("ffuf not found. Please install it: https://github.com/ffuf/ffuf")
-    wordlist = select_wordlist(request.wordlist_attributes)
-    requests_flag_map = {
-        "cookie_data":               ["-b", request.cookie_data],
-        "post_data":                 ["-d", request.post_data],
-        "headers":                   ["-H", request.headers],
-        "extensions":                ["-e", ",".join(request.extensions)] if request.extensions else None,
+    wordlist = select_wordlist(ffuf_dependencies.wordlist_attributes)
+    ffuf_dependenciess_flag_map = {
+        "cookie_data":               ["-b", ffuf_dependencies.cookie_data],
+        "post_data":                 ["-d", ffuf_dependencies.post_data],
+        "headers":                   ["-H", ffuf_dependencies.headers],
+        "extensions":                ["-e", ",".join(ffuf_dependencies.extensions)] if ffuf_dependencies.extensions else None,
         "verbose":                   ["-v"],
-        "match_lines":               ["-ml", str(request.match_lines)],
-        "match_http_response_size":  ["-ms", str(request.match_http_response_size)],
-        "filter_http_status_codes":  ["-fc", ",".join(str(c) for c in request.filter_http_status_codes)] if request.filter_http_status_codes else None,
-        "filter_lines":              ["-fl", str(request.filter_lines)],
-        "filter_http_response_size": ["-fs", str(request.filter_http_response_size)],
+        "match_lines":               ["-ml", str(ffuf_dependencies.match_lines)],
+        "match_http_response_size":  ["-ms", str(ffuf_dependencies.match_http_response_size)],
+        "filter_http_status_codes":  ["-fc", ",".join(str(c) for c in ffuf_dependencies.filter_http_status_codes)] if ffuf_dependencies.filter_http_status_codes else None,
+        "filter_lines":              ["-fl", str(ffuf_dependencies.filter_lines)],
+        "filter_http_response_size": ["-fs", str(ffuf_dependencies.filter_http_response_size)],
     }
     
     extra_flags = []
-    keys = list(requests_flag_map.keys())
-    for key, flags in requests_flag_map.items():
-        if getattr(request, key):
+    keys = list(ffuf_dependenciess_flag_map.keys())
+    for key, flags in ffuf_dependenciess_flag_map.items():
+        if getattr(ffuf_dependencies, key):
             extra_flags.extend(flags)
 
-    mc_codes = ",".join(str(c) for c in request.match_http_status_codes)
+    mc_codes = ",".join(str(c) for c in ffuf_dependencies.match_http_status_codes)
+    target_url_chars = list(str(ffuf_dependencies.target_url).strip())
+    if target_url_chars[-1] == "Z": # implying FUZZ was manually appended by agent
+        fuzz_url = str(ffuf_dependencies.target_url)
+    elif target_url_chars[-1] == "/":
+        fuzz_url = str(ffuf_dependencies.target_url)+"FUZZ"
+    else:
+        fuzz_url = str(ffuf_dependencies.target_url)+"/FUZZ"
+
     cmd = ["ffuf", 
-           "-u", str(request.target_url), 
+           "-u", str(fuzz_url), 
            "-w", wordlist, 
-           "-recursion-depth", str(request.recursion),
-           "-X", request.http_method,
+           "-recursion-depth", str(ffuf_dependencies.recursion),
+           "-X", ffuf_dependencies.http_method,
            "-mc", mc_codes,
-           "-maxtime", str(request.maxtime),
+           "-maxtime", str(ffuf_dependencies.maxtime),
            *extra_flags, 
            "-c"]
     print(f"ffuf running: {' '.join(cmd)}")
