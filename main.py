@@ -1,9 +1,11 @@
-import subprocess, os, json, asyncio, sys, dotenv
+import subprocess, os, json, asyncio, sys, dotenv, xmltodict
 from pydantic import BaseModel, Field
 from pydantic_ai import Agent, RunContext, ModelRetry
 from datetime import datetime
 from pydantic.networks import IPvAnyAddress, IPvAnyNetwork, AnyUrl
 from typing import Literal
+import requests
+from time import sleep
 
 class PortRange(BaseModel):
     start: int
@@ -19,6 +21,7 @@ class WebRequest(BaseModel):
     cookie_data: str | None = Field(default=None, description="(i.e. NAME1=VALUE1; NAME2=VALUE2).")
     post_data: str | None = Field(default=None, description = "POST data to pass to request.")
     headers: str | None = Field(default=None, description = "Headers to pass into request")
+    timeout: int = Field(default=60, description='Maximum running time in seconds per job.')
 
 
 class NmapDeps(BaseModel):
@@ -35,7 +38,6 @@ class FfufDeps(WebRequest):
     extensions: list[str] | None = Field(default=None, description = "Comma-separated list of extensions names with dot-included (i.e. .php,.txt).")
     follow_redirects: bool = Field(default=False)
     verbose: bool = Field(default=False, description="Verbose output, printing full URL and redirect location (if any) with the results.")
-    maxtime: int = Field(default=60, description='Maximum running time in seconds per job.')
     match_http_status_codes: list[int] = Field(default=[200,204,301,302,307,401,403], description="Match HTTP status codes.")
     match_lines: int | None = Field(default=None, description="Match amount of lines in response.")
     match_http_response_size: int | None = Field(default=None, description="Match HTTP response size.")
@@ -112,7 +114,7 @@ async def nmap_scan(ctx: RunContext, scan: NmapDeps) -> str:
     except:
         print("Nmap not found. Please install it: https://nmap.org/download")
         sys.exit()
-    time = str(datetime.now())
+    file_name = "scan_"+ str(datetime.now()) + ".xml"
 
     scan_map = {
         "syn":                 "-sS",
@@ -131,10 +133,10 @@ async def nmap_scan(ctx: RunContext, scan: NmapDeps) -> str:
            "nmap", 
            *flags, 
            str(scan.target), 
-           "-oN", 
-           time]
+           "-oX", 
+           file_name]
     if "ping-only" in flags:
-        cmd = ["sudo", "nmap", "-sn", str(scan.target), "-oN", time]
+        cmd = ["sudo", "nmap", "-sn", str(scan.target), "-oX", file_name]
     elif scan.top_ports:
         cmd.extend(["--top-ports", str(scan.top_ports)])
     elif scan.ports:
@@ -142,8 +144,9 @@ async def nmap_scan(ctx: RunContext, scan: NmapDeps) -> str:
         cmd.extend(["-p", ports])
     print(f"running: {" ".join(cmd)}")
     result = subprocess.run(cmd, capture_output=True, text=True)
-    result = result.stdout if result.stdout != '' else result.stderr
-    print(result)
+    with open(file_name) as f:
+        result =json.dumps(xmltodict.parse(f.read()), indent=2)
+    result = result
     return result
 
 @agent.tool
@@ -188,7 +191,7 @@ async def ffuf_scan(ctx: RunContext, ffuf_dependencies: FfufDeps) -> str:
            "-recursion-depth", str(ffuf_dependencies.recursion),
            "-X", ffuf_dependencies.http_method,
            "-mc", mc_codes,
-           "-maxtime", str(ffuf_dependencies.maxtime),
+           "-maxtime", str(ffuf_dependencies.timeout),
            *extra_flags, 
            "-c"]
     print(f"ffuf running: {' '.join(cmd)}")
@@ -213,8 +216,22 @@ async def ffuf_scan(ctx: RunContext, ffuf_dependencies: FfufDeps) -> str:
     return "".join(output_lines)
 
 @agent.tool
-async def make_web_request(ctx: RunContext):
-    pass
+async def make_web_request(ctx: RunContext, request_dependencies: WebRequest) -> dict:
+    """In the process of enumerating a web server, it may be useful to make a specific request and see if anything useful comes from it."""
+    r = requests.get(str(request_dependencies.target_url))
+
+    while int(r.elapsed.total_seconds()) < request_dependencies.timeout:
+        sleep(1)
+    
+    response = {
+        "response_code":        r.status_code,
+        "response_headers":     r.headers,
+        "elapsed_time":         r.elapsed,
+        "redirect_responses":   r.history,
+        "url_after_redirects":  r.url,
+        "response_cookies":     r.cookies
+    }
+    return response
 
 @agent.tool
 async def write_to_file(ctx: RunContext, content: str, name_of_file: str=Field(description="Only specify the name of the file to write to, not a path.")) -> int:
@@ -257,7 +274,7 @@ async def main():
         result = await agent.run(prompt, message_history=history)
         history = result.all_messages()
 
-        print(result.output.response_text, "\n")
+        print("\nAgent:", result.output.response_text, "\n")
         #print(result.output.model_dump_json(indent=2))
 
 asyncio.run(main())

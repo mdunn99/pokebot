@@ -11,15 +11,13 @@ cd poke-bot
 ## Install Python Dependencies
 `pip install -r requirements.txt`
 
-## Install searchsploit If Necessary
-```
-sudo apt install git
-git clone --depth 1 https://gitlab.com/exploit-database/exploitdb.git /opt/exploit-database # Clone the repo
-sudo ln -sf /opt/exploit-database/searchsploit /usr/local/bin/searchsploit # Add searchsploit to your PATH
-```
+## Install Other Dependencies:
+Nmap: https://github.com/nmap/nmap
+Searchsploit: https://gitlab.com/exploit-database/exploitdb.git
+ffuf: https://github.com/ffuf/ffuf
 
 ## Set Your API Key
-`echo '<YOURAPI_KEY_HERE>' > .env`
+`echo 'OPEN_API_KEY=<YOURAPI_KEY_HERE>' > .env`
 
 # Features
 - Structured prompt parsing (good for security: don't give an agent a shell!)
@@ -30,3 +28,5 @@ sudo ln -sf /opt/exploit-database/searchsploit /usr/local/bin/searchsploit # Add
 - ffuf
 - exploitdb search
 
+# Working On
+Implementing httpx to allow agent to intercept requests and responses at the transport layer.
