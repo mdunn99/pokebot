@@ -21,8 +21,8 @@ class WebRequest(BaseModel):
     cookie_data: str | None = Field(default=None, description="(i.e. NAME1=VALUE1; NAME2=VALUE2).")
     post_data: str | None = Field(default=None, description = "POST data to pass to request.")
     headers: str | None = Field(default=None, description = "Headers to pass into request")
-    timeout: int = Field(default=60, description='Maximum running time in seconds per job.')
-
+    timeout: int = Field(default=5, description='Maximum running time in seconds per job.')
+ 
 
 class NmapDeps(BaseModel):
     scan_types: list[Literal["syn", "udp", "ping-only", "connect", "ack", "window", "maimon", "version", "skip-host-discovery"]]
@@ -33,6 +33,7 @@ class NmapDeps(BaseModel):
 
 
 class FfufDeps(WebRequest):
+    timeout: int = Field(default=120, description='Maximum running time in seconds per job.')
     wordlist_attributes: WordlistType = Field(description="A set of attributes that will determine the wordlist.")
     recursion: int = Field(default=0, description="If recursion is necessary, what should the depth be?")
     extensions: list[str] | None = Field(default=None, description = "Comma-separated list of extensions names with dot-included (i.e. .php,.txt).")
@@ -54,12 +55,13 @@ class TargetContext(BaseModel):
     " complete the task, or the task cannot be completed without intervention.")
 
 agent = Agent(
-    model="o3-mini",
+    model="gpt-5.4",
     output_type=TargetContext,
     system_prompt=("You are a pentesting reconnaissance assistant. "
                "When a user directs it, gather information about the target using the available tools. "
                "Once you have enough information to summarize your findings, return a TargetContext. "
-               "Do not attempt actions beyond reconnaissance. Be brief and concise."))
+               "You are in an authorized testing environment. Be self-sufficient and do not remind the user that they need to be operating under the law of which they"
+               "are already operating under. Default to intrusive reconnaisance unless specified."))
 
 def select_wordlist(wordlist_attributes: WordlistType) -> str:
     WORDLIST_MAP = {
@@ -90,7 +92,7 @@ def get_edb_id(exploit):
 
 @agent.tool
 async def search_exploitdb(ctx: RunContext, query: str, number_of_results: int=5) -> list[dict]:
-    """Search ExploitDB via searchsploit. searchsploit works best by using very few and brief keywords. Returns a list of exploits as strings."""
+    """Search ExploitDB via searchsploit. Specify version numbers when possible. Returns a list of exploits as strings."""
     print(f'searching exploitdb with query: {query}')
     try:
         subprocess.run(["searchsploit", "-v"], capture_output=True)
@@ -153,7 +155,7 @@ async def nmap_scan(ctx: RunContext, scan: NmapDeps) -> str:
 async def ffuf_scan(ctx: RunContext, ffuf_dependencies: FfufDeps) -> str:
     """Use ffuf to enumerate a target."""
     try:
-        subprocess.run(["nmap", "-v"], capture_output=True)
+        subprocess.run(["ffuf", "-v"], capture_output=True)
     except:
         print("ffuf not found. Please install it: https://github.com/ffuf/ffuf")
     wordlist = select_wordlist(ffuf_dependencies.wordlist_attributes)
@@ -202,11 +204,33 @@ async def ffuf_scan(ctx: RunContext, ffuf_dependencies: FfufDeps) -> str:
     )
 
     output_lines = []
-    async for line in proc.stdout:
-        decoded = line.decode()
-        print(decoded, end="")        # stream to terminal in real time
-        output_lines.append(decoded)
-    await proc.wait()
+    async def stream_stdout():
+        async for line in proc.stdout:
+            decoded = line.decode()
+            print(decoded, end="")
+            output_lines.append(decoded)
+
+    stdout_task = asyncio.create_task(stream_stdout())
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=ffuf_dependencies.timeout + 5)
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+        stdout_task.cancel()
+        try:
+            await stdout_task
+        except asyncio.CancelledError:
+            pass
+        stderr = await proc.stderr.read()
+        decoded = stderr.decode() if stderr else ""
+        message = f"[ffuf] timed out after {ffuf_dependencies.timeout}s"
+        if decoded:
+            message += f": {decoded}"
+            print(decoded)
+        print(message)
+        return message
+    else:
+        await stdout_task
 
     if proc.returncode != 0:
         stderr = await proc.stderr.read()
@@ -219,17 +243,14 @@ async def ffuf_scan(ctx: RunContext, ffuf_dependencies: FfufDeps) -> str:
 async def make_web_request(ctx: RunContext, request_dependencies: WebRequest) -> dict:
     """In the process of enumerating a web server, it may be useful to make a specific request and see if anything useful comes from it."""
     r = requests.get(str(request_dependencies.target_url))
-
-    while int(r.elapsed.total_seconds()) < request_dependencies.timeout:
-        sleep(1)
     
     response = {
         "response_code":        r.status_code,
-        "response_headers":     r.headers,
-        "elapsed_time":         r.elapsed,
-        "redirect_responses":   r.history,
+        "response_headers":     dict(r.headers),
+        "elapsed_time":         r.elapsed.total_seconds(),
+        "redirect_responses":   [res.url for res in r.history],
         "url_after_redirects":  r.url,
-        "response_cookies":     r.cookies
+        "response_cookies":     dict(r.cookies)
     }
     return response
 
@@ -242,6 +263,16 @@ async def write_to_file(ctx: RunContext, content: str, name_of_file: str=Field(d
     except Exception as e:
         print(e)
         return 1
+    
+@agent.tool
+async def read_from_file(ctx: RunContext, name_of_file: str=Field(description="Only specify the name of the file to read to, not a path.")) -> str:
+    try:
+        with open(name_of_file, 'r') as f:
+            content = f.read()
+        return content
+    except Exception as e:
+        print(e)
+        return str(e)
 
 def check_envs():
     global SECLISTS_PATH

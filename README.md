@@ -1,5 +1,5 @@
 # Pokebot - Cybersecurity Recon Helper
-**Pokebot** speeds up pentesting for your clients or yourself. It's a Python-powered, GPT-powered agent that performs basic initial recon tools on your behalf.
+**Pokebot** speeds up pentesting for your clients or yourself. It's a GPT-powered agent that performs basic initial recon tools on your behalf.
 Currently **only Linux** is supported.
 
 # Use & Install
